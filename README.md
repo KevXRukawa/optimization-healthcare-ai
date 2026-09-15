@@ -8,6 +8,14 @@ The application is built with Streamlit and integrates a Hugging Face Transforme
 
 ---
 
+## ⚕️ Medical Disclaimer
+
+This application is a **clinical decision-support aid only**. It does not replace assessment by qualified medical personnel. Model predictions may be wrong, including under-estimating the severity of genuinely critical conditions. Always confirm the risk level with a trained clinician before acting on any recommendation.
+
+This project is intended for research, education, and demonstration purposes. It is **not** validated for real clinical deployment.
+
+---
+
 ## Features
 
 * 🤖 AI-based symptom risk assessment
@@ -32,6 +40,20 @@ The NLP model predicts one of the following categories:
 * **LOW_RISK**
 
   * Non-emergency conditions.
+
+### Language Support
+
+The model accepts symptom descriptions in **both Indonesian and English**.
+
+```text
+"tidak sadarkan diri, tidak bernapas"  -> HIGH_RISK
+"batuk ringan sudah dua hari"          -> LOW_RISK
+"chest pain and shortness of breath"   -> MEDIUM_RISK
+```
+
+### Confidence Threshold
+
+Predictions with confidence below **70%** are not accepted automatically. The application blocks dispatch and requires a clinician to confirm or correct the risk level before proceeding.
 
 ---
 
@@ -100,7 +122,7 @@ source venv/bin/activate
 ### 3. Install Dependencies
 
 ```bash
-pip install streamlit transformers torch folium streamlit-folium
+pip install -r requirements.txt
 ```
 
 ---
@@ -168,6 +190,17 @@ MODEL_PATH = "./finished_triage_model"
 5. View the recommended hospital.
 6. Confirm dispatch.
 7. Monitor hospital capacity status.
+
+---
+
+## Known Limitations
+
+These are current, deliberate constraints of the prototype:
+
+* **Hospital capacity is per-session, not shared.** Capacity is stored in Streamlit `session_state`, so each browser session tracks its own counters and everything resets when the page reloads. Concurrent users do not see each other's dispatches. A real deployment needs a shared database.
+* **Symptom text is limited to 512 tokens.** This is the maximum sequence length of the underlying BERT model. Longer descriptions are truncated and the application displays a warning so the remaining text can be reviewed manually.
+* **The model can be confidently wrong.** It returns high confidence even for meaningless input, so the confidence score should not be read as a reliability guarantee. Severity of some cardiac presentations may be under-estimated; predictions require clinical validation.
+* **Hospital selection ignores distance.** Allocation is based on hospital class and available capacity only. Coordinates are used solely for map display.
 
 ---
 

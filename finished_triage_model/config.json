@@ -1,5 +1,5 @@
 {
-  "_num_labels": 5,
+  "_num_labels": 3,
   "architectures": [
     "BertForSequenceClassification"
   ],

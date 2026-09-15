@@ -11,6 +11,20 @@ st.set_page_config(
 
 MODEL_PATH = "./finished_triage_model"
 
+# Maximum sequence length supported by the underlying BERT model.
+# Inputs longer than this must be truncated or inference will crash.
+MAX_TOKENS = 512
+
+# Predictions below this confidence are held for human review
+# before dispatch is allowed.
+CONFIDENCE_THRESHOLD = 0.70
+
+DISCLAIMER = (
+    "This tool is a clinical decision-support aid only. It does not replace "
+    "assessment by qualified medical personnel. Always confirm the risk level "
+    "with a trained clinician before acting on any recommendation."
+)
+
 
 @st.cache_resource
 def load_model():
@@ -24,11 +38,39 @@ def load_model():
     )
 
 
-classifier = load_model()
+try:
+    classifier = load_model()
+except Exception as error:
+    st.error("❌ Failed to load the triage model.")
+    st.caption(
+        f"Check that '{MODEL_PATH}' exists and contains all model files. "
+        f"Details: {error}"
+    )
+    st.stop()
 
 HIGH = "HIGH_RISK"
 MEDIUM = "MEDIUM_RISK"
 LOW = "LOW_RISK"
+
+RISK_LEVELS = [HIGH, MEDIUM, LOW]
+
+
+def classify_symptoms(text):
+    """Classify symptom text into a risk level.
+
+    Returns a (risk, confidence, was_truncated) tuple. Text longer than
+    MAX_TOKENS is truncated so that inference cannot crash on long input.
+    """
+    token_count = len(classifier.tokenizer(text)["input_ids"])
+    was_truncated = token_count > MAX_TOKENS
+
+    result = classifier(
+        text,
+        truncation=True,
+        max_length=MAX_TOKENS
+    )[0]
+
+    return result["label"], result["score"], was_truncated
 
 
 class Hospital:
@@ -92,6 +134,12 @@ if "recommendation" not in st.session_state:
 if "confidence" not in st.session_state:
     st.session_state.confidence = None
 
+if "needs_review" not in st.session_state:
+    st.session_state.needs_review = False
+
+if "was_truncated" not in st.session_state:
+    st.session_state.was_truncated = False
+
 if "dispatched" not in st.session_state:
     st.session_state.dispatched = False
 
@@ -100,6 +148,8 @@ def reset_patient():
     st.session_state.patient = None
     st.session_state.recommendation = None
     st.session_state.confidence = None
+    st.session_state.needs_review = False
+    st.session_state.was_truncated = False
     st.session_state.dispatched = False
 
 
@@ -120,6 +170,14 @@ def hospital_order(risk, hospitals):
         )
 
 
+def find_hospital(risk):
+    """Return the first hospital able to admit a patient at this risk level."""
+    for hospital in hospital_order(risk, st.session_state.hospitals):
+        if hospital.can_handle(risk):
+            return hospital
+    return None
+
+
 st.markdown(
     """
     <h1 style='text-align: center;'>🚑 Smart Triage & Hospital Dispatch</h1>
@@ -129,6 +187,8 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
+st.info(f"⚕️ {DISCLAIMER}", icon="⚕️")
 
 st.divider()
 
@@ -144,42 +204,50 @@ if st.session_state.patient is None:
 
         symptoms = st.text_area(
             "Describe Symptoms",
-            placeholder="e.g. chest pain, shortness of breath, unconscious..."
+            placeholder=(
+                "e.g. chest pain, shortness of breath, unconscious...\n"
+                "Bahasa Indonesia juga didukung, mis. nyeri dada, sesak napas"
+            )
         )
 
         st.markdown("")
 
         if st.button("🔍 Assess Patient", use_container_width=True):
 
-            if name and symptoms:
+            if name.strip() and symptoms.strip():
 
-                result = classifier(symptoms)[0]
+                try:
+                    with st.spinner("Analysing symptoms..."):
+                        risk, confidence, was_truncated = classify_symptoms(
+                            symptoms.strip()
+                        )
 
-                risk = result["label"]
-                confidence = result["score"]
+                except Exception as error:
+                    st.error(
+                        "❌ Assessment failed. The patient was not recorded. "
+                        "Please try again or escalate manually."
+                    )
+                    st.caption(f"Details: {error}")
 
-                st.session_state.patient = {
-                    "name": name,
-                    "risk": risk
-                }
+                else:
+                    st.session_state.patient = {
+                        "name": name.strip(),
+                        "risk": risk
+                    }
 
-                st.session_state.confidence = confidence
-                st.session_state.recommendation = None
+                    st.session_state.confidence = confidence
+                    st.session_state.was_truncated = was_truncated
+                    st.session_state.needs_review = (
+                        confidence < CONFIDENCE_THRESHOLD
+                    )
+                    st.session_state.recommendation = find_hospital(risk)
 
-                for h in hospital_order(
-                    risk,
-                    st.session_state.hospitals
-                ):
-                    if h.can_handle(risk):
-                        st.session_state.recommendation = h
-                        break
-
-                st.rerun()
+                    st.rerun()
 
             else:
                 st.warning("Please complete all fields")
 
-#TRIAGE RESULT
+# TRIAGE RESULT
 
 elif not st.session_state.dispatched:
 
@@ -189,6 +257,8 @@ elif not st.session_state.dispatched:
     st.subheader("📋 Triage Result")
 
     with st.container(border=True):
+
+        st.caption(f"Patient: **{p['name']}**")
 
         col1, col2 = st.columns(2)
 
@@ -205,6 +275,14 @@ elif not st.session_state.dispatched:
             )
 
         st.divider()
+
+        if st.session_state.was_truncated:
+            st.warning(
+                "✂️ The symptom description exceeded the model limit of "
+                f"{MAX_TOKENS} tokens and was truncated. Only the earlier "
+                "part of the text was assessed. Review the full description "
+                "manually before dispatch."
+            )
 
         if p["risk"] == HIGH:
             st.error("⚠️ Critical condition detected")
@@ -225,6 +303,34 @@ elif not st.session_state.dispatched:
                 f"{h.name} (Class {h.hospital_class})"
             )
 
+    # HUMAN REVIEW GATE FOR LOW-CONFIDENCE PREDICTIONS
+
+    if st.session_state.needs_review:
+
+        st.error(
+            "🧑‍⚕️ **Human review required.** Model confidence is below "
+            f"{CONFIDENCE_THRESHOLD:.0%}, so this prediction is not reliable "
+            "enough to act on unchecked. Confirm or correct the risk level "
+            "before dispatch."
+        )
+
+        with st.container(border=True):
+
+            reviewed_risk = st.selectbox(
+                "Confirmed risk level (clinician decision)",
+                RISK_LEVELS,
+                index=RISK_LEVELS.index(p["risk"])
+            )
+
+            if st.button(
+                "✅ Confirm Risk Level",
+                use_container_width=True
+            ):
+                st.session_state.patient["risk"] = reviewed_risk
+                st.session_state.recommendation = find_hospital(reviewed_risk)
+                st.session_state.needs_review = False
+                st.rerun()
+
     st.markdown("### Confirm Dispatch")
 
     col1, col2 = st.columns(2)
@@ -235,15 +341,25 @@ elif not st.session_state.dispatched:
 
             if st.button(
                 "🚑 Dispatch Patient",
-                use_container_width=True
+                use_container_width=True,
+                disabled=st.session_state.needs_review,
+                help=(
+                    "Confirm the risk level first"
+                    if st.session_state.needs_review
+                    else None
+                )
             ):
-                with st.spinner("Dispatching patient..."):
-                    pass
+                # Re-check capacity in case it changed since assessment
+                if not h.can_handle(p["risk"]):
+                    st.error(
+                        "❌ That hospital is no longer available. "
+                        "Please reassess the patient."
+                    )
+                else:
+                    h.admit(p["risk"])
 
-                h.admit(p["risk"])
-
-                st.session_state.dispatched = True
-                st.rerun()
+                    st.session_state.dispatched = True
+                    st.rerun()
 
     with col2:
 
@@ -297,8 +413,17 @@ with st.expander("🏨 Hospital Capacity Status"):
 
     for h in st.session_state.hospitals:
 
-        st.write(
+        status = (
             f"**{h.name}** (Class {h.hospital_class})\n"
-            f"- Normal: {h.current}/{h.capacity}\n"
-            f"- UGD: {h.ugd_current}/{h.ugd_capacity}"
+            f"- Normal: {h.current}/{h.capacity}"
         )
+
+        if h.ugd_capacity > 0:
+            status += f"\n- UGD: {h.ugd_current}/{h.ugd_capacity}"
+
+        st.write(status)
+
+    st.caption(
+        "⚠️ Capacity is tracked per browser session for simulation purposes "
+        "and resets when the page reloads. It is not shared between users."
+    )
